@@ -24,16 +24,23 @@
 .PARAMETER SignInLogDays
     Days of sign-in history to pull (default: 7; max retention is 30).
 
+.PARAMETER TenantDomain
+    The domain or tenant ID of the target tenant (e.g. contoso.onmicrosoft.com or a GUID).
+    If omitted the script will prompt interactively. Prevents accidentally running against
+    a tenant you already manage.
+
 .PARAMETER SkipAppSummary
     Skip per-app install summary collection (slow for large app catalogs).
 
 .EXAMPLE
     .\Invoke-AzureTenantAssessment.ps1
-    .\Invoke-AzureTenantAssessment.ps1 -SkipSignInLogs -OutputDir "C:\Reports\Contoso"
+    .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
+    .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipSignInLogs -OutputDir "C:\Reports\Contoso"
 #>
 
 [CmdletBinding()]
 param(
+    [string]$TenantDomain  = "",
     [string]$OutputDir     = "",
     [switch]$SkipSignInLogs,
     [int]   $SignInLogDays = 7,
@@ -77,8 +84,19 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
     Install-Module Microsoft.Graph -Scope CurrentUser -Force
 }
 
-Write-Host "[*] Connecting to Microsoft Graph..." -ForegroundColor Cyan
-Connect-MgGraph -Scopes @(
+# ── Prompt for target tenant ──
+if (-not $TenantDomain) {
+    Write-Host "  Enter the target tenant domain or tenant ID." -ForegroundColor Yellow
+    Write-Host "  Examples: contoso.onmicrosoft.com | 3a1b2c3d-... " -ForegroundColor Gray
+    Write-Host ""
+    do {
+        $TenantDomain = (Read-Host "  Target tenant").Trim()
+    } while (-not $TenantDomain)
+}
+Write-Host ""
+Write-Host "[*] Target tenant : $TenantDomain" -ForegroundColor Cyan
+
+$requiredScopes = @(
     "Directory.Read.All"
     "Policy.Read.All"
     "UserAuthenticationMethod.Read.All"
@@ -92,10 +110,26 @@ Connect-MgGraph -Scopes @(
     "IdentityRiskyUser.Read.All"
     "RoleManagement.Read.Directory"
     "Organization.Read.All"
-) -NoWelcome
+)
+
+Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
+Connect-MgGraph -TenantId $TenantDomain -Scopes $requiredScopes -NoWelcome
 
 $ctx = Get-MgContext
-Write-Host "[+] Connected: $($ctx.Account) | Tenant: $($ctx.TenantId)`n" -ForegroundColor Green
+
+# Confirm we landed on the right tenant before proceeding
+$connectedTenant = $ctx.TenantId
+Write-Host "[+] Connected : $($ctx.Account)" -ForegroundColor Green
+Write-Host "    Tenant ID : $connectedTenant" -ForegroundColor Green
+Write-Host ""
+Write-Host "    Confirm this is the correct tenant before continuing." -ForegroundColor Yellow
+$confirm = Read-Host "    Proceed with assessment? (yes/no)"
+if ($confirm.Trim().ToLower() -notin @('yes','y')) {
+    Write-Host "[!] Assessment cancelled." -ForegroundColor Red
+    Disconnect-MgGraph | Out-Null
+    exit 0
+}
+Write-Host ""
 
 #endregion
 

@@ -27,19 +27,29 @@ Install-Module Microsoft.Graph -Scope CurrentUser -Force
 
 ## Usage
 
+The script always prompts for the **target tenant domain or ID** before connecting.
+This prevents accidentally running the assessment against a tenant you already manage.
+
 ```powershell
-# Standard run — opens HTML report automatically when done
+# Prompts interactively for tenant domain, then opens browser sign-in
 .\Invoke-AzureTenantAssessment.ps1
 
-# Skip sign-in logs (faster, skips legacy auth data)
-.\Invoke-AzureTenantAssessment.ps1 -SkipSignInLogs
+# Pass the tenant up front (skips the prompt)
+.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
 
-# Custom output folder, 14-day sign-in window
-.\Invoke-AzureTenantAssessment.ps1 -OutputDir "C:\Reports\Contoso" -SignInLogDays 14
+# Full example with options
+.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com `
+    -OutputDir "C:\Reports\Contoso" `
+    -SignInLogDays 14
+
+# Skip sign-in logs (faster on large tenants)
+.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipSignInLogs
 
 # Skip per-app install summaries (faster for large app catalogs)
-.\Invoke-AzureTenantAssessment.ps1 -SkipAppSummary
+.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipAppSummary
 ```
+
+After authenticating, the script confirms the connected tenant ID and asks you to confirm before proceeding — a second safety check before any data is pulled.
 
 Output lands in `.\AssessmentOutput\<timestamp>\`:
 - `AzureTenantAssessment.html` — self-contained HTML report (open in any browser)
