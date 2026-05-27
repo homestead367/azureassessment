@@ -145,10 +145,10 @@ $scopesToRequest = if ($WithIntune) { $coreScopes + $intuneScopes } else { $core
 # -WithIntune adds the DeviceManagement scopes to the same request.
 if ($script:InCloudShell) {
     Write-Host "[*] Connecting via device code — a code will appear below..." -ForegroundColor Cyan
-    Connect-MgGraph -TenantId $TenantDomain -Scopes $scopesToRequest -UseDeviceCode -NoWelcome
+    Connect-MgGraph -TenantId $TenantDomain -Scopes $scopesToRequest -UseDeviceCode -NoWelcome -ContextScope Process
 } else {
     Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
-    Connect-MgGraph -TenantId $TenantDomain -Scopes $scopesToRequest -NoWelcome
+    Connect-MgGraph -TenantId $TenantDomain -Scopes $scopesToRequest -NoWelcome -ContextScope Process
 }
 
 # Verify the connection actually succeeded
