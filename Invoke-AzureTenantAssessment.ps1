@@ -814,10 +814,113 @@ foreach ($f in $sorted) {
 }
 $allFindingsHtml += '</ul>'
 
-# Banner shown at the top of sections 4-7 when Intune scopes were unavailable
-$intuneSkipBanner = if (-not $script:HasIntuneAccess) {
-    "<div class='alert alert-warning py-2 mb-3'><i class='bi bi-exclamation-triangle-fill me-2'></i><strong>Intune data not collected.</strong> The <code>DeviceManagement*</code> scopes were blocked by this tenant (AADSTS650053). This usually means Intune is not licensed here, or the tenant admin has restricted app consent. Re-run with an account that has Intune Administrator rights and admin consent granted to collect this data.</div>"
-} else { '' }
+# ── Intune HTML blocks (sections 4-7, nav links, scorecard rows) ──────────────
+# Built outside the main $html here-string to avoid triple-nesting on Linux PS7.
+# When -WithIntune was not passed these are all empty strings.
+if ($script:HasIntuneAccess) {
+
+    $intuneNavHtml = @"
+  <a href="#intune">4. Intune Profiles</a>
+  <a href="#compliance">5. Device Compliance</a>
+  <a href="#autopilot">6. Autopilot</a>
+  <a href="#apps">7. Applications</a>
+"@
+
+    $intuneScoreHtml = @"
+        <tr><td><a href="#intune">Intune Config Profiles</a></td><td>$(section-badge 'Intune Profiles')</td><td>$configCount profiles: $winProfiles Windows &bull; $macProfiles macOS &bull; $iosProfiles iOS/Android</td></tr>
+        <tr><td><a href="#compliance">Device Compliance</a></td><td>$(section-badge 'Device Compliance')</td><td>$compliancePct% compliant ($compliantDev/$totalDevices) &bull; $nonCompliantDev non-compliant &bull; $unknownDev unknown</td></tr>
+        <tr><td><a href="#autopilot">Windows Autopilot</a></td><td>$(section-badge 'Autopilot')</td><td>$autopilotCount registered &bull; $withGroupTag with Group Tag &bull; $noGroupTag without Group Tag</td></tr>
+        <tr><td><a href="#apps">Application Deployment</a></td><td>$(section-badge 'App Deployment')</td><td>$totalApps apps &bull; $assignedApps assigned &bull; $unassignedApps unassigned</td></tr>
+"@
+
+    $s4body = @"
+<div class='stat-row'>
+  $(stat-box $configCount 'Total Profiles' 'info')
+  $(stat-box $winProfiles 'Windows'        'info')
+  $(stat-box $macProfiles 'macOS'          'info')
+  $(stat-box $iosProfiles 'iOS/Android'    'info')
+</div>
+<div class='findings-title'>Configuration Profiles</div>
+$intuneTable
+<div class='findings-title mt-3'>Findings</div>
+$(findings-list 'Intune Profiles')
+"@
+
+    $s5body = @"
+<div class='row g-3'>
+  <div class='col-md-8'>
+    <div class='stat-row'>
+      $(stat-box "$compliancePct%" 'Compliant Rate' $hc_comp_col)
+      $(stat-box $compliantDev    'Compliant'      'success')
+      $(stat-box $nonCompliantDev 'Non-Compliant'  $hc_noncomp_col)
+      $(stat-box $unknownDev      'Unknown'        'secondary')
+      $(stat-box $gracePeriodDev  'Grace Period'   'warning')
+      $(stat-box $($compliancePolicies.Count) 'Policies' 'info')
+    </div>
+    <div class='findings-title'>Compliance Policies</div>
+    $compPolicyTable
+    <div class='findings-title mt-3'>Non-Compliant &amp; Unknown Devices</div>
+    $devTable
+  </div>
+  <div class='col-md-4'>
+    <div class='findings-title'>Compliance Breakdown</div>
+    <div class='chart-wrap mb-3'><canvas id='complianceChart'></canvas></div>
+    <div class='findings-title'>OS Breakdown</div>
+    <div class='chart-wrap'><canvas id='osChart'></canvas></div>
+  </div>
+</div>
+<div class='findings-title mt-3'>Findings</div>
+$(findings-list 'Device Compliance')
+"@
+
+    $s6body = @"
+<div class='stat-row'>
+  $(stat-box $autopilotCount 'Registered Devices' 'info')
+  $(stat-box $withGroupTag   'With Group Tag'      'success')
+  $(stat-box $noGroupTag     'Missing Group Tag'   $hc_nogt_col)
+</div>
+<div class='findings-title'>Autopilot Device Inventory</div>
+$apTable
+<div class='findings-title mt-3'>Findings</div>
+$(findings-list 'Autopilot')
+"@
+
+    $s7body = @"
+<div class='stat-row'>
+  $(stat-box $totalApps      'Total Apps'  'info')
+  $(stat-box $assignedApps   'Assigned'    'success')
+  $(stat-box $unassignedApps 'Unassigned'  $hc_unasn_col)
+</div>
+<div class='findings-title'>Application Inventory $hc_appnote</div>
+$appsTable
+<div class='findings-title mt-3'>Findings</div>
+$(findings-list 'App Deployment')
+"@
+
+    $intuneHtmlBlock  = (section-wrap 'intune'     '4' 'bi-gear'             'Intune Configuration Profile Review'  $s4body)
+    $intuneHtmlBlock += (section-wrap 'compliance' '5' 'bi-clipboard-check'  'Device Compliance Policy Assessment'  $s5body)
+    $intuneHtmlBlock += (section-wrap 'autopilot'  '6' 'bi-laptop'           'Windows Autopilot Registration Status' $s6body)
+    $intuneHtmlBlock += (section-wrap 'apps'       '7' 'bi-box-seam'         'Application Deployment Review'        $s7body)
+    $intuneHtmlBlock += @"
+<script>
+new Chart(document.getElementById('complianceChart'),{
+  type:'doughnut',
+  data:{ labels:[$compChartLabels], datasets:[{data:[$compChartData], backgroundColor:palette, borderWidth:2}]},
+  options:{plugins:{legend:{position:'bottom',labels:{font:{size:11},padding:8}}}, cutout:'60%'}
+});
+new Chart(document.getElementById('osChart'),{
+  type:'bar',
+  data:{ labels:[$osChartLabels], datasets:[{label:'Devices', data:[$osChartData], backgroundColor:'#3b82f6', borderRadius:4}]},
+  options:{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{grid:{display:false}},y:{grid:{display:false}}}}
+});
+</script>
+"@
+
+} else {
+    $intuneNavHtml   = ''
+    $intuneScoreHtml = ''
+    $intuneHtmlBlock = ''
+}
 
 # Pre-compute all conditional values used in stat-box calls.
 # 'if' inside (parens) inside a nested here-string fails on Linux PowerShell 7 —
@@ -943,10 +1046,7 @@ $html = @"
   <a href="#entra">1. Entra ID</a>
   <a href="#ca">2. Conditional Access</a>
   <a href="#mfa">3. MFA</a>
-  <a href="#intune">4. Intune Profiles</a>
-  <a href="#compliance">5. Device Compliance</a>
-  <a href="#autopilot">6. Autopilot</a>
-  <a href="#apps">7. Applications</a>
+$intuneNavHtml
   <a href="#licensing">8. Licensing</a>
   <a href="#legacy">9. Legacy Auth</a>
   <a href="#emergency">10. Emergency Access</a>
@@ -989,10 +1089,7 @@ $html = @"
         <tr><td><a href="#entra">Entra ID Configuration</a></td><td>$(section-badge 'Entra ID')</td><td>$totalUsers users ($enabledUsers enabled, $guestUsers guests, $hybridUsers hybrid), $federatedDoms federated domain(s)</td></tr>
         <tr><td><a href="#ca">Conditional Access</a></td><td>$(section-badge 'Conditional Access')</td><td>$enabledPolicies enabled &bull; $reportOnlyPolicies report-only &bull; $disabledPolicies disabled | MFA All-Users: $(if($mfaAllUsersPolicy){'Yes'}else{'NO'}) &bull; Legacy Blocked: $(if($legacyBlockPolicy){'Yes'}else{'NO'})</td></tr>
         <tr><td><a href="#mfa">MFA Posture</a></td><td>$(section-badge 'MFA Posture')</td><td>$mfaPct% registered ($mfaRegistered/$mfaTotal) &bull; $msAuthApp Authenticator &bull; $passwordless passwordless capable &bull; $noMfa no MFA</td></tr>
-        <tr><td><a href="#intune">Intune Config Profiles</a></td><td>$(section-badge 'Intune Profiles')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$configCount profiles: $winProfiles Windows &bull; $macProfiles macOS &bull; $iosProfiles iOS/Android"})</td></tr>
-        <tr><td><a href="#compliance">Device Compliance</a></td><td>$(section-badge 'Device Compliance')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$compliancePct% compliant ($compliantDev/$totalDevices) &bull; $nonCompliantDev non-compliant &bull; $unknownDev unknown"})</td></tr>
-        <tr><td><a href="#autopilot">Windows Autopilot</a></td><td>$(section-badge 'Autopilot')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$autopilotCount registered &bull; $withGroupTag with Group Tag &bull; $noGroupTag without Group Tag"})</td></tr>
-        <tr><td><a href="#apps">Application Deployment</a></td><td>$(section-badge 'App Deployment')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$totalApps apps &bull; $assignedApps assigned &bull; $unassignedApps unassigned"})</td></tr>
+$intuneScoreHtml
         <tr><td><a href="#licensing">M365 Licensing</a></td><td>$(section-badge 'Licensing')</td><td>$licenseUtil% utilization ($totalAssigned/$totalAvailable seats) &bull; $unusedSeats unused seats</td></tr>
         <tr><td><a href="#legacy">Legacy Authentication</a></td><td>$(section-badge 'Legacy Authentication')</td><td>$(if($SkipSignInLogs){'Skipped'}else{"$legacyCount sign-ins ($legacyUniqueU unique users) in last $SignInLogDays days"})</td></tr>
         <tr><td><a href="#emergency">Emergency Access</a></td><td>$(section-badge 'Emergency Access')</td><td>$emergencyCount potential break-glass account(s) identified</td></tr>
@@ -1067,77 +1164,7 @@ $(section-wrap 'mfa' '3' 'bi-phone' 'MFA Posture Assessment' @"
 $(findings-list 'MFA Posture')
 "@)
 
-<!-- ── 4. INTUNE PROFILES ── -->
-$(section-wrap 'intune' '4' 'bi-gear' 'Intune Configuration Profile Review' @"
-$intuneSkipBanner
-<div class='stat-row'>
-  $(stat-box $configCount  'Total Profiles' 'info')
-  $(stat-box $winProfiles  'Windows'        'info')
-  $(stat-box $macProfiles  'macOS'          'info')
-  $(stat-box $iosProfiles  'iOS/Android'    'info')
-</div>
-<div class='findings-title'>Configuration Profiles</div>
-$intuneTable
-<div class='findings-title mt-3'>Findings</div>
-$(findings-list 'Intune Profiles')
-"@)
-
-<!-- ── 5. DEVICE COMPLIANCE ── -->
-$(section-wrap 'compliance' '5' 'bi-clipboard-check' 'Device Compliance Policy Assessment' @"
-$intuneSkipBanner
-<div class='row g-3'>
-  <div class='col-md-8'>
-    <div class='stat-row'>
-      $(stat-box "$compliancePct%" 'Compliant Rate' $hc_comp_col)
-      $(stat-box $compliantDev    'Compliant'      'success')
-      $(stat-box $nonCompliantDev 'Non-Compliant'  $hc_noncomp_col)
-      $(stat-box $unknownDev     'Unknown'        'secondary')
-      $(stat-box $gracePeriodDev 'Grace Period'   'warning')
-      $(stat-box $($compliancePolicies.Count) 'Policies' 'info')
-    </div>
-    <div class='findings-title'>Compliance Policies</div>
-    $compPolicyTable
-    <div class='findings-title mt-3'>Non-Compliant &amp; Unknown Devices</div>
-    $devTable
-  </div>
-  <div class='col-md-4'>
-    <div class='findings-title'>Compliance Breakdown</div>
-    <div class='chart-wrap mb-3'><canvas id='complianceChart'></canvas></div>
-    <div class='findings-title'>OS Breakdown</div>
-    <div class='chart-wrap'><canvas id='osChart'></canvas></div>
-  </div>
-</div>
-<div class='findings-title mt-3'>Findings</div>
-$(findings-list 'Device Compliance')
-"@)
-
-<!-- ── 6. AUTOPILOT ── -->
-$(section-wrap 'autopilot' '6' 'bi-laptop' 'Windows Autopilot Registration Status' @"
-$intuneSkipBanner
-<div class='stat-row'>
-  $(stat-box $autopilotCount 'Registered Devices'  'info')
-  $(stat-box $withGroupTag   'With Group Tag'       'success')
-  $(stat-box $noGroupTag     'Missing Group Tag'    $hc_nogt_col)
-</div>
-<div class='findings-title'>Autopilot Device Inventory</div>
-$apTable
-<div class='findings-title mt-3'>Findings</div>
-$(findings-list 'Autopilot')
-"@)
-
-<!-- ── 7. APPLICATIONS ── -->
-$(section-wrap 'apps' '7' 'bi-box-seam' 'Application Deployment Review' @"
-$intuneSkipBanner
-<div class='stat-row'>
-  $(stat-box $totalApps      'Total Apps'   'info')
-  $(stat-box $assignedApps   'Assigned'     'success')
-  $(stat-box $unassignedApps 'Unassigned'   $hc_unasn_col)
-</div>
-<div class='findings-title'>Application Inventory $hc_appnote</div>
-$appsTable
-<div class='findings-title mt-3'>Findings</div>
-$(findings-list 'App Deployment')
-"@)
+$intuneHtmlBlock
 
 <!-- ── 8. LICENSING ── -->
 $(section-wrap 'licensing' '8' 'bi-tag' 'Microsoft 365 Licensing Audit' @"
@@ -1208,17 +1235,6 @@ new Chart(document.getElementById('mfaChart'),{
   options:{plugins:{legend:{position:'bottom',labels:{font:{size:11},padding:8}}}, cutout:'60%'}
 });
 
-new Chart(document.getElementById('complianceChart'),{
-  type:'doughnut',
-  data:{ labels:[$compChartLabels], datasets:[{data:[$compChartData], backgroundColor:palette, borderWidth:2}]},
-  options:{plugins:{legend:{position:'bottom',labels:{font:{size:11},padding:8}}}, cutout:'60%'}
-});
-
-new Chart(document.getElementById('osChart'),{
-  type:'bar',
-  data:{ labels:[$osChartLabels], datasets:[{label:'Devices', data:[$osChartData], backgroundColor:'#3b82f6', borderRadius:4}]},
-  options:{indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{grid:{display:false}},y:{grid:{display:false}}}}
-});
 </script>
 </body>
 </html>
