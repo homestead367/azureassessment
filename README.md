@@ -27,20 +27,40 @@ Install-Module Microsoft.Graph -Scope CurrentUser -Force
 
 ## Usage
 
-The script always prompts for the **target tenant domain or ID** before connecting.
-This prevents accidentally running the assessment against a tenant you already manage.
+The script always prompts for the **target tenant domain or ID** before connecting — preventing accidental runs against a tenant you already manage. After authenticating it shows the resolved tenant ID and asks you to confirm before pulling any data.
+
+### Azure Cloud Shell (recommended)
+
+```bash
+# 1. Open Cloud Shell in the Azure portal (PowerShell mode)
+# 2. Upload the script via the toolbar, or clone this repo:
+git clone https://github.com/homestead367/azureassessment.git ~/clouddrive/azureassessment
+
+# 3. Run
+pwsh ~/clouddrive/azureassessment/Invoke-AzureTenantAssessment.ps1
+
+# Pass the tenant up front to skip the interactive prompt
+pwsh ~/clouddrive/azureassessment/Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
+```
+
+In Cloud Shell, authentication uses **device code flow** — the script prints a short code and a URL. Open the URL in any browser, enter the code, and sign in to the target tenant. The script detects Cloud Shell automatically and saves output to `~/clouddrive/AzureAssessment/<timestamp>/` (persistent across sessions).
+
+To download the HTML report after the run:
+- Click **Upload/Download files** in the Cloud Shell toolbar → Download → paste the path shown at the end of the run
+- **Or** browse the Azure Storage account backing your Cloud Shell: `fileshare > clouddrive > AzureAssessment`
+
+### Local PowerShell
 
 ```powershell
-# Prompts interactively for tenant domain, then opens browser sign-in
+# Prompts interactively for tenant, then opens browser sign-in
 .\Invoke-AzureTenantAssessment.ps1
 
-# Pass the tenant up front (skips the prompt)
+# Pass tenant up front
 .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
 
-# Full example with options
+# With options
 .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com `
-    -OutputDir "C:\Reports\Contoso" `
-    -SignInLogDays 14
+    -OutputDir "C:\Reports\Contoso" -SignInLogDays 14
 
 # Skip sign-in logs (faster on large tenants)
 .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipSignInLogs
@@ -48,8 +68,6 @@ This prevents accidentally running the assessment against a tenant you already m
 # Skip per-app install summaries (faster for large app catalogs)
 .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipAppSummary
 ```
-
-After authenticating, the script confirms the connected tenant ID and asks you to confirm before proceeding — a second safety check before any data is pulled.
 
 Output lands in `.\AssessmentOutput\<timestamp>\`:
 - `AzureTenantAssessment.html` — self-contained HTML report (open in any browser)

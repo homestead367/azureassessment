@@ -33,9 +33,13 @@
     Skip per-app install summary collection (slow for large app catalogs).
 
 .EXAMPLE
+    # Local PowerShell
     .\Invoke-AzureTenantAssessment.ps1
     .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
-    .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipSignInLogs -OutputDir "C:\Reports\Contoso"
+
+    # Azure Cloud Shell — save script to ~/clouddrive first, then:
+    pwsh ~/clouddrive/Invoke-AzureTenantAssessment.ps1
+    pwsh ~/clouddrive/Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipSignInLogs
 #>
 
 [CmdletBinding()]
@@ -49,6 +53,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
+
+# Detect Azure Cloud Shell
+$script:InCloudShell = ($env:AZUREPS_HOST_ENVIRONMENT -like 'cloud-shell*') -or ($env:ACC_CLOUD -ne $null)
 
 #region ── SETUP ──────────────────────────────────────────────────────────────
 
@@ -69,14 +76,22 @@ function HE([string]$s) {
 }
 
 if (-not $OutputDir) {
-    $ts        = Get-Date -Format "yyyyMMdd_HHmmss"
-    $OutputDir = Join-Path $PSScriptRoot "AssessmentOutput\$ts"
+    $ts = Get-Date -Format "yyyyMMdd_HHmmss"
+    # In Cloud Shell write to persistent clouddrive so the report survives the session
+    $OutputDir = if ($script:InCloudShell) {
+        Join-Path $HOME "clouddrive/AzureAssessment/$ts"
+    } else {
+        Join-Path ($PSScriptRoot ? $PSScriptRoot : $PWD) "AssessmentOutput/$ts"
+    }
 }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 Write-Host "`n╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host   "║   Azure Tenant Comprehensive Security Assessment     ║" -ForegroundColor Cyan
 Write-Host   "╚══════════════════════════════════════════════════════╝`n" -ForegroundColor Cyan
+if ($script:InCloudShell) {
+    Write-Host "  Running in Azure Cloud Shell" -ForegroundColor Yellow
+}
 Write-Host "Output: $OutputDir`n" -ForegroundColor Gray
 
 if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
@@ -112,8 +127,14 @@ $requiredScopes = @(
     "Organization.Read.All"
 )
 
-Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
-Connect-MgGraph -TenantId $TenantDomain -Scopes $requiredScopes -NoWelcome
+if ($script:InCloudShell) {
+    # Cloud Shell has no local browser — use device code flow (prints a URL + code to paste)
+    Write-Host "[*] Connecting via device code flow — a code will appear below..." -ForegroundColor Cyan
+    Connect-MgGraph -TenantId $TenantDomain -Scopes $requiredScopes -UseDeviceCode -NoWelcome
+} else {
+    Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
+    Connect-MgGraph -TenantId $TenantDomain -Scopes $requiredScopes -NoWelcome
+}
 
 $ctx = Get-MgContext
 
@@ -1162,6 +1183,15 @@ Write-Host "  Warnings    : $warnCount"  -ForegroundColor $(if ($warnCount -gt 0
 Write-Host "  Good        : $goodCount"  -ForegroundColor Green
 Write-Host ""
 
-Start-Process $reportPath
+if ($script:InCloudShell) {
+    Write-Host "  To download the report from Cloud Shell:" -ForegroundColor Yellow
+    Write-Host "  1. Click the 'Upload/Download files' button in the Cloud Shell toolbar" -ForegroundColor Gray
+    Write-Host "  2. Choose Download and enter: $reportPath" -ForegroundColor Gray
+    Write-Host "     -- OR --" -ForegroundColor Gray
+    Write-Host "  Open the Azure Storage account backing your Cloud Shell and browse to:" -ForegroundColor Gray
+    Write-Host "  fileshare > clouddrive > AzureAssessment > $($reportPath | Split-Path -Leaf)" -ForegroundColor Gray
+} else {
+    Start-Process $reportPath
+}
 
 #endregion
