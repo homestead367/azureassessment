@@ -33,14 +33,14 @@ The script always prompts for the **target tenant domain or ID** before connecti
 
 ```bash
 # 1. Open Cloud Shell in the Azure portal (PowerShell mode)
-# 2. Upload the script via the toolbar, or clone this repo:
+# 2. Clone this repo:
 git clone https://github.com/homestead367/azureassessment.git ~/clouddrive/azureassessment
 
-# 3. Run
-pwsh ~/clouddrive/azureassessment/Invoke-AzureTenantAssessment.ps1
-
-# Pass the tenant up front to skip the interactive prompt
+# 3. Run — core assessment (works on every tenant)
 pwsh ~/clouddrive/azureassessment/Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
+
+# 4. Run — include Intune data (only if tenant has Intune licensed)
+pwsh ~/clouddrive/azureassessment/Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -WithIntune
 ```
 
 In Cloud Shell, authentication uses **device code flow** — the script prints a short code and a URL. Open the URL in any browser, enter the code, and sign in to the target tenant. The script detects Cloud Shell automatically and saves output to `~/clouddrive/AzureAssessment/<timestamp>/` (persistent across sessions).
@@ -52,22 +52,25 @@ To download the HTML report after the run:
 ### Local PowerShell
 
 ```powershell
-# Prompts interactively for tenant, then opens browser sign-in
-.\Invoke-AzureTenantAssessment.ps1
-
-# Pass tenant up front
+# Core assessment — safe for any tenant, never hits AADSTS650053
 .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
 
-# With options
-.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com `
-    -OutputDir "C:\Reports\Contoso" -SignInLogDays 14
+# Add Intune sections (4-7) — only when tenant has Intune licensed
+.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -WithIntune
 
 # Skip sign-in logs (faster on large tenants)
 .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipSignInLogs
 
-# Skip per-app install summaries (faster for large app catalogs)
-.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipAppSummary
+# All options
+.\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -WithIntune `
+    -OutputDir "C:\Reports\Contoso" -SignInLogDays 14 -SkipAppSummary
 ```
+
+### Intune and AADSTS650053
+
+`DeviceManagement*` scopes cause **AADSTS650053** on any tenant where Intune is not licensed — Microsoft's auth endpoint rejects the scope request outright before a token is issued.
+
+By default the script requests **core scopes only**, which work everywhere. Pass `-WithIntune` only when you know the target tenant has an Intune-capable license (Microsoft 365 Business Premium, E3 + EMS, E5, etc.).
 
 Output lands in `.\AssessmentOutput\<timestamp>\`:
 - `AzureTenantAssessment.html` — self-contained HTML report (open in any browser)

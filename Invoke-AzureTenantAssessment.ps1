@@ -33,19 +33,22 @@
     Skip per-app install summary collection (slow for large app catalogs).
 
 .EXAMPLE
-    # Local PowerShell
-    .\Invoke-AzureTenantAssessment.ps1
+    # Tenant without Intune (default — safe for any tenant, never hits AADSTS650053)
     .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
 
-    # Azure Cloud Shell — save script to ~/clouddrive first, then:
-    pwsh ~/clouddrive/Invoke-AzureTenantAssessment.ps1
-    pwsh ~/clouddrive/Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -SkipSignInLogs
+    # Tenant WITH Intune — pass -WithIntune to include sections 4-7
+    .\Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -WithIntune
+
+    # Azure Cloud Shell
+    pwsh ~/clouddrive/azureassessment/Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com
+    pwsh ~/clouddrive/azureassessment/Invoke-AzureTenantAssessment.ps1 -TenantDomain contoso.onmicrosoft.com -WithIntune
 #>
 
 [CmdletBinding()]
 param(
     [string]$TenantDomain  = "",
     [string]$OutputDir     = "",
+    [switch]$WithIntune,          # Include Intune sections (4-7). Only use when target tenant has Intune licensed.
     [switch]$SkipSignInLogs,
     [int]   $SignInLogDays = 7,
     [switch]$SkipAppSummary
@@ -111,7 +114,7 @@ if (-not $TenantDomain) {
 Write-Host ""
 Write-Host "[*] Target tenant : $TenantDomain" -ForegroundColor Cyan
 
-# Core scopes — available on every tenant
+# Core scopes — work on every tenant, no Intune required
 $coreScopes = @(
     "Directory.Read.All"
     "Policy.Read.All"
@@ -123,8 +126,9 @@ $coreScopes = @(
     "Organization.Read.All"
 )
 
-# Intune scopes — require Intune licensing and tenant consent;
-# some tenants block these (AADSTS650053) so we request them separately
+# Intune scopes — only available when Intune is licensed in the target tenant.
+# Requesting these on a tenant without Intune causes AADSTS650053, which is why
+# they are NEVER requested unless the caller explicitly passes -WithIntune.
 $intuneScopes = @(
     "DeviceManagementConfiguration.Read.All"
     "DeviceManagementCompliance.Read.All"
@@ -134,44 +138,51 @@ $intuneScopes = @(
 )
 
 $script:HasIntuneAccess = $false
+$scopesToRequest = if ($WithIntune) { $coreScopes + $intuneScopes } else { $coreScopes }
 
-function Connect-Graph([string[]]$Scopes) {
-    if ($script:InCloudShell) {
-        Write-Host "[*] Connecting via device code flow — a code will appear below..." -ForegroundColor Cyan
-        Connect-MgGraph -TenantId $TenantDomain -Scopes $Scopes -UseDeviceCode -NoWelcome -ErrorAction Stop
-    } else {
-        Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
-        Connect-MgGraph -TenantId $TenantDomain -Scopes $Scopes -NoWelcome -ErrorAction Stop
-    }
+# ── Phase 1: Connect ──
+# Always starts with core scopes so auth never fails with AADSTS650053.
+# -WithIntune adds the DeviceManagement scopes to the same request.
+if ($script:InCloudShell) {
+    Write-Host "[*] Connecting via device code — a code will appear below..." -ForegroundColor Cyan
+    Connect-MgGraph -TenantId $TenantDomain -Scopes $scopesToRequest -UseDeviceCode -NoWelcome
+} else {
+    Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
+    Connect-MgGraph -TenantId $TenantDomain -Scopes $scopesToRequest -NoWelcome
 }
 
-# Try full scope set first; fall back to core-only if Intune scopes are blocked
-try {
-    Connect-Graph ($coreScopes + $intuneScopes)
-    $script:HasIntuneAccess = $true
-} catch {
-    $errMsg = $_.ToString()
-    if ($errMsg -like '*AADSTS650053*' -or $errMsg -like '*scope*does not exist*' -or $errMsg -like '*DeviceManagement*') {
-        Write-Host ""
-        Write-Host "[!] Intune scopes were rejected by this tenant (AADSTS650053)." -ForegroundColor Yellow
-        Write-Host "    This usually means Intune is not licensed or the tenant admin" -ForegroundColor Yellow
-        Write-Host "    has restricted app consent for DeviceManagement permissions." -ForegroundColor Yellow
-        Write-Host "    Retrying with core scopes — sections 4-7 will be skipped." -ForegroundColor Yellow
-        Write-Host ""
-        Connect-Graph $coreScopes
-        $script:HasIntuneAccess = $false
-    } else {
-        # Some other auth error — re-throw so it's visible
-        throw
-    }
-}
-
+# Verify the connection actually succeeded
 $ctx = Get-MgContext
+if (-not $ctx -or -not $ctx.TenantId) {
+    Write-Host ""
+    Write-Host "[!] Authentication did not complete. Common reasons:" -ForegroundColor Red
+    Write-Host "    • Browser window was closed without signing in" -ForegroundColor Yellow
+    Write-Host "    • Conditional Access policy blocked the sign-in" -ForegroundColor Yellow
+    Write-Host "    • Tenant domain / ID is incorrect" -ForegroundColor Yellow
+    if ($WithIntune) {
+        Write-Host "    • AADSTS650053: Intune is not licensed in this tenant." -ForegroundColor Yellow
+        Write-Host "      Remove -WithIntune and re-run. Sections 4-7 will be skipped." -ForegroundColor Yellow
+    }
+    Write-Host ""
+    exit 1
+}
 
-# Confirm we landed on the right tenant before proceeding
-$connectedTenant = $ctx.TenantId
+# Mark Intune access based on whether scopes were successfully granted
+if ($WithIntune) {
+    $grantedScopes = $ctx.Scopes
+    $script:HasIntuneAccess = ($grantedScopes -contains 'DeviceManagementCompliance.Read.All')
+    if (-not $script:HasIntuneAccess) {
+        Write-Host "[!] -WithIntune was set but DeviceManagement scopes were not granted." -ForegroundColor Yellow
+        Write-Host "    Sections 4-7 will be skipped. Verify Intune is licensed in this tenant." -ForegroundColor Yellow
+    } else {
+        Write-Host "[+] Intune scopes granted — sections 4-7 will be included." -ForegroundColor Green
+    }
+}
+
+# Confirm we are on the right tenant before pulling any data
+Write-Host ""
 Write-Host "[+] Connected : $($ctx.Account)" -ForegroundColor Green
-Write-Host "    Tenant ID : $connectedTenant" -ForegroundColor Green
+Write-Host "    Tenant ID : $($ctx.TenantId)" -ForegroundColor Green
 Write-Host ""
 Write-Host "    Confirm this is the correct tenant before continuing." -ForegroundColor Yellow
 $confirm = Read-Host "    Proceed with assessment? (yes/no)"
