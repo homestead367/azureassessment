@@ -205,7 +205,14 @@ function Collect([string]$Label, [scriptblock]$Cmd) {
         Write-Host " $count records" -ForegroundColor Green
         return $r
     } catch {
-        Write-Host " ERROR: $_" -ForegroundColor Red
+        $e = $_.ToString()
+        if ($e -like '*not licensed*' -or ($e -like '*403*' -and $e -like '*Forbidden*')) {
+            Write-Host " Skipped (tenant not licensed for this feature)" -ForegroundColor Yellow
+        } elseif ($e -like '*401*' -or $e -like '*Unauthorized*') {
+            Write-Host " Skipped (insufficient permissions)" -ForegroundColor Yellow
+        } else {
+            Write-Host " ERROR: $e" -ForegroundColor Red
+        }
         return @()
     }
 }
@@ -812,6 +819,41 @@ $intuneSkipBanner = if (-not $script:HasIntuneAccess) {
     "<div class='alert alert-warning py-2 mb-3'><i class='bi bi-exclamation-triangle-fill me-2'></i><strong>Intune data not collected.</strong> The <code>DeviceManagement*</code> scopes were blocked by this tenant (AADSTS650053). This usually means Intune is not licensed here, or the tenant admin has restricted app consent. Re-run with an account that has Intune Administrator rights and admin consent granted to collect this data.</div>"
 } else { '' }
 
+# Pre-compute all conditional values used in stat-box calls.
+# 'if' inside (parens) inside a nested here-string fails on Linux PowerShell 7 —
+# variables resolve fine; inline if expressions do not.
+$hc_mfaAll_val  = if ($mfaAllUsersPolicy) { 'Yes' }     else { 'NO' }
+$hc_mfaAll_col  = if ($mfaAllUsersPolicy) { 'success' } else { 'danger' }
+$hc_legacy_val  = if ($legacyBlockPolicy) { 'Yes' }     else { 'NO' }
+$hc_legacy_col  = if ($legacyBlockPolicy) { 'success' } else { 'danger' }
+$hc_srisk_val   = if ($signInRiskPolicy)  { 'Yes' }     else { 'NO' }
+$hc_srisk_col   = if ($signInRiskPolicy)  { 'success' } else { 'warning' }
+$hc_urisk_val   = if ($userRiskPolicy)    { 'Yes' }     else { 'NO' }
+$hc_urisk_col   = if ($userRiskPolicy)    { 'success' } else { 'warning' }
+
+$hc_mfapct_col  = if ($mfaPct -ge 90)  { 'success' } elseif ($mfaPct -ge 70)  { 'warning' } else { 'danger' }
+$hc_nomfa_col   = if ($noMfa -eq 0)    { 'success' } else { 'danger' }
+$hc_phone_col   = if ($phoneMethod -gt 0) { 'warning' } else { 'success' }
+$hc_mfalbl      = if ($noMfaList.Count -gt 50) { "(showing first 50 of $($noMfaList.Count))" } else { '' }
+
+$hc_comp_col    = if ($compliancePct -ge 90) { 'success' } elseif ($compliancePct -ge 70) { 'warning' } else { 'danger' }
+$hc_noncomp_col = if ($nonCompliantDev -gt 0) { 'danger' }   else { 'success' }
+$hc_nogt_col    = if ($noGroupTag -gt 0)      { 'warning' }  else { 'success' }
+$hc_unasn_col   = if ($unassignedApps -gt 0)  { 'warning' }  else { 'success' }
+$hc_appnote     = if (-not $SkipAppSummary)   { '(&#10003; installs / &#10007; failures shown inline)' } else { '(run without -SkipAppSummary for install counts)' }
+
+$hc_unused_col  = if ($unusedSeats -gt 20) { 'warning' } elseif ($unusedSeats -gt 0) { 'info' } else { 'success' }
+$hc_licutil_col = if ($licenseUtil -ge 80) { 'success' } else { 'warning' }
+
+$hc_lgcnt_val   = if ($SkipSignInLogs) { 'N/A' } else { "$legacyCount" }
+$hc_lgcnt_col   = if ($legacyCount   -gt 0) { 'danger' } else { 'success' }
+$hc_lguniq_val  = if ($SkipSignInLogs) { 'N/A' } else { "$legacyUniqueU" }
+$hc_lguniq_col  = if ($legacyUniqueU  -gt 0) { 'danger' } else { 'success' }
+$hc_lgblk_val   = if ($legacyBlockPolicy) { 'Blocked' } else { 'Open' }
+$hc_lgblk_col   = if ($legacyBlockPolicy) { 'success' } else { 'danger' }
+
+$hc_emerg_col   = if ($emergencyCount -gt 0) { 'success' } else { 'danger' }
+
 $html = @"
 <!DOCTYPE html>
 <html lang="en">
@@ -989,10 +1031,10 @@ $(section-wrap 'ca' '2' 'bi-shield-lock' 'Conditional Access Policy Audit' @"
   $(stat-box $enabledPolicies    'Enabled'         'success')
   $(stat-box $reportOnlyPolicies 'Report Only'     'warning')
   $(stat-box $disabledPolicies   'Disabled'        'secondary')
-  $(stat-box (if($mfaAllUsersPolicy){'Yes'}else{'NO'})  'MFA All Users'    (if($mfaAllUsersPolicy){'success'}else{'danger'}))
-  $(stat-box (if($legacyBlockPolicy){'Yes'}else{'NO'})  'Legacy Blocked'   (if($legacyBlockPolicy){'success'}else{'danger'}))
-  $(stat-box (if($signInRiskPolicy){'Yes'}else{'NO'})   'Sign-in Risk CA'  (if($signInRiskPolicy){'success'}else{'warning'}))
-  $(stat-box (if($userRiskPolicy){'Yes'}else{'NO'})     'User Risk CA'     (if($userRiskPolicy){'success'}else{'warning'}))
+  $(stat-box $hc_mfaAll_val 'MFA All Users'    $hc_mfaAll_col)
+  $(stat-box $hc_legacy_val 'Legacy Blocked'   $hc_legacy_col)
+  $(stat-box $hc_srisk_val  'Sign-in Risk CA'  $hc_srisk_col)
+  $(stat-box $hc_urisk_val  'User Risk CA'     $hc_urisk_col)
 </div>
 <div class='findings-title'>Policies</div>
 $caTable
@@ -1005,15 +1047,15 @@ $(section-wrap 'mfa' '3' 'bi-phone' 'MFA Posture Assessment' @"
 <div class='row g-3'>
   <div class='col-md-8'>
     <div class='stat-row'>
-      $(stat-box "$mfaPct%" 'MFA Registered %' (if($mfaPct -ge 90){'success'}elseif($mfaPct -ge 70){'warning'}else{'danger'}))
-      $(stat-box $mfaRegistered 'Registered'      'info')
-      $(stat-box $noMfa         'No MFA'          (if($noMfa -eq 0){'success'}else{'danger'}))
+      $(stat-box "$mfaPct%" 'MFA Registered %' $hc_mfapct_col)
+      $(stat-box $mfaRegistered 'Registered'       'info')
+      $(stat-box $noMfa         'No MFA'           $hc_nomfa_col)
       $(stat-box $msAuthApp     'MS Authenticator' 'info')
       $(stat-box $oathTotp      'OATH/TOTP'        'info')
-      $(stat-box $phoneMethod   'SMS/Voice'        (if($phoneMethod -gt 0){'warning'}else{'success'}))
+      $(stat-box $phoneMethod   'SMS/Voice'        $hc_phone_col)
       $(stat-box $passwordless  'Passwordless'     'info')
     </div>
-    <div class='findings-title'>Users Without MFA $(if($noMfaList.Count -gt 50){"(showing first 50 of $($noMfaList.Count))"})</div>
+    <div class='findings-title'>Users Without MFA $hc_mfalbl</div>
     $mfaTable
   </div>
   <div class='col-md-4'>
@@ -1046,9 +1088,9 @@ $intuneSkipBanner
 <div class='row g-3'>
   <div class='col-md-8'>
     <div class='stat-row'>
-      $(stat-box "$compliancePct%" 'Compliant Rate' (if($compliancePct -ge 90){'success'}elseif($compliancePct -ge 70){'warning'}else{'danger'}))
-      $(stat-box $compliantDev   'Compliant'     'success')
-      $(stat-box $nonCompliantDev 'Non-Compliant' (if($nonCompliantDev -gt 0){'danger'}else{'success'}))
+      $(stat-box "$compliancePct%" 'Compliant Rate' $hc_comp_col)
+      $(stat-box $compliantDev    'Compliant'      'success')
+      $(stat-box $nonCompliantDev 'Non-Compliant'  $hc_noncomp_col)
       $(stat-box $unknownDev     'Unknown'        'secondary')
       $(stat-box $gracePeriodDev 'Grace Period'   'warning')
       $(stat-box $($compliancePolicies.Count) 'Policies' 'info')
@@ -1075,7 +1117,7 @@ $intuneSkipBanner
 <div class='stat-row'>
   $(stat-box $autopilotCount 'Registered Devices'  'info')
   $(stat-box $withGroupTag   'With Group Tag'       'success')
-  $(stat-box $noGroupTag     'Missing Group Tag'    (if($noGroupTag -gt 0){'warning'}else{'success'}))
+  $(stat-box $noGroupTag     'Missing Group Tag'    $hc_nogt_col)
 </div>
 <div class='findings-title'>Autopilot Device Inventory</div>
 $apTable
@@ -1089,9 +1131,9 @@ $intuneSkipBanner
 <div class='stat-row'>
   $(stat-box $totalApps      'Total Apps'   'info')
   $(stat-box $assignedApps   'Assigned'     'success')
-  $(stat-box $unassignedApps 'Unassigned'   (if($unassignedApps -gt 0){'warning'}else{'success'}))
+  $(stat-box $unassignedApps 'Unassigned'   $hc_unasn_col)
 </div>
-<div class='findings-title'>Application Inventory $(if(-not $SkipAppSummary){"(&#10003; installs / &#10007; failures shown inline)"}else{"(run without -SkipAppSummary for install counts)"})</div>
+<div class='findings-title'>Application Inventory $hc_appnote</div>
 $appsTable
 <div class='findings-title mt-3'>Findings</div>
 $(findings-list 'App Deployment')
@@ -1103,8 +1145,8 @@ $(section-wrap 'licensing' '8' 'bi-tag' 'Microsoft 365 Licensing Audit' @"
   $(stat-box $($skus.Count)  'License SKUs'    'info')
   $(stat-box $totalAssigned  'Assigned Seats'  'info')
   $(stat-box $totalAvailable 'Total Available' 'info')
-  $(stat-box $unusedSeats    'Unused Seats'    (if($unusedSeats -gt 20){'warning'}elseif($unusedSeats -gt 0){'info'}else{'success'}))
-  $(stat-box "$licenseUtil%" 'Utilization'     (if($licenseUtil -ge 80){'success'}else{'warning'}))
+  $(stat-box $unusedSeats    'Unused Seats'    $hc_unused_col)
+  $(stat-box "$licenseUtil%" 'Utilization'     $hc_licutil_col)
 </div>
 <div class='findings-title'>License SKUs</div>
 $skuTable
@@ -1115,9 +1157,9 @@ $(findings-list 'Licensing')
 <!-- ── 9. LEGACY AUTH ── -->
 $(section-wrap 'legacy' '9' 'bi-exclamation-triangle' 'Legacy Authentication Analysis' @"
 <div class='stat-row'>
-  $(stat-box (if($SkipSignInLogs){'N/A'}else{$legacyCount}) "Sign-ins (${SignInLogDays}d)" (if($legacyCount -gt 0){'danger'}else{'success'}))
-  $(stat-box (if($SkipSignInLogs){'N/A'}else{$legacyUniqueU}) 'Unique Users'   (if($legacyUniqueU -gt 0){'danger'}else{'success'}))
-  $(stat-box (if($legacyBlockPolicy){'Blocked'}else{'Open'}) 'CA Block Policy' (if($legacyBlockPolicy){'success'}else{'danger'}))
+  $(stat-box $hc_lgcnt_val  "Sign-ins (${SignInLogDays}d)" $hc_lgcnt_col)
+  $(stat-box $hc_lguniq_val 'Unique Users'                $hc_lguniq_col)
+  $(stat-box $hc_lgblk_val  'CA Block Policy'             $hc_lgblk_col)
 </div>
 <div class='findings-title'>Legacy Authentication Sign-ins</div>
 $legacyTable
@@ -1128,7 +1170,7 @@ $(findings-list 'Legacy Authentication')
 <!-- ── 10. EMERGENCY ACCESS ── -->
 $(section-wrap 'emergency' '10' 'bi-key' 'Emergency Access Account Review' @"
 <div class='stat-row'>
-  $(stat-box $emergencyCount 'Accounts Found' (if($emergencyCount -gt 0){'success'}else{'danger'}))
+  $(stat-box $emergencyCount 'Accounts Found' $hc_emerg_col)
 </div>
 <div class='alert alert-info py-2 small'>
   <i class='bi bi-info-circle me-1'></i>
