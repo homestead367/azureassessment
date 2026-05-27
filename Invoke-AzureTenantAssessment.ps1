@@ -111,15 +111,11 @@ if (-not $TenantDomain) {
 Write-Host ""
 Write-Host "[*] Target tenant : $TenantDomain" -ForegroundColor Cyan
 
-$requiredScopes = @(
+# Core scopes — available on every tenant
+$coreScopes = @(
     "Directory.Read.All"
     "Policy.Read.All"
     "UserAuthenticationMethod.Read.All"
-    "DeviceManagementConfiguration.Read.All"
-    "DeviceManagementCompliance.Read.All"
-    "DeviceManagementApps.Read.All"
-    "DeviceManagementServiceConfig.Read.All"
-    "DeviceManagementManagedDevices.Read.All"
     "AuditLog.Read.All"
     "Reports.Read.All"
     "IdentityRiskyUser.Read.All"
@@ -127,13 +123,47 @@ $requiredScopes = @(
     "Organization.Read.All"
 )
 
-if ($script:InCloudShell) {
-    # Cloud Shell has no local browser — use device code flow (prints a URL + code to paste)
-    Write-Host "[*] Connecting via device code flow — a code will appear below..." -ForegroundColor Cyan
-    Connect-MgGraph -TenantId $TenantDomain -Scopes $requiredScopes -UseDeviceCode -NoWelcome
-} else {
-    Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
-    Connect-MgGraph -TenantId $TenantDomain -Scopes $requiredScopes -NoWelcome
+# Intune scopes — require Intune licensing and tenant consent;
+# some tenants block these (AADSTS650053) so we request them separately
+$intuneScopes = @(
+    "DeviceManagementConfiguration.Read.All"
+    "DeviceManagementCompliance.Read.All"
+    "DeviceManagementApps.Read.All"
+    "DeviceManagementServiceConfig.Read.All"
+    "DeviceManagementManagedDevices.Read.All"
+)
+
+$script:HasIntuneAccess = $false
+
+function Connect-Graph([string[]]$Scopes) {
+    if ($script:InCloudShell) {
+        Write-Host "[*] Connecting via device code flow — a code will appear below..." -ForegroundColor Cyan
+        Connect-MgGraph -TenantId $TenantDomain -Scopes $Scopes -UseDeviceCode -NoWelcome -ErrorAction Stop
+    } else {
+        Write-Host "[*] Connecting to Microsoft Graph (browser sign-in will open)..." -ForegroundColor Cyan
+        Connect-MgGraph -TenantId $TenantDomain -Scopes $Scopes -NoWelcome -ErrorAction Stop
+    }
+}
+
+# Try full scope set first; fall back to core-only if Intune scopes are blocked
+try {
+    Connect-Graph ($coreScopes + $intuneScopes)
+    $script:HasIntuneAccess = $true
+} catch {
+    $errMsg = $_.ToString()
+    if ($errMsg -like '*AADSTS650053*' -or $errMsg -like '*scope*does not exist*' -or $errMsg -like '*DeviceManagement*') {
+        Write-Host ""
+        Write-Host "[!] Intune scopes were rejected by this tenant (AADSTS650053)." -ForegroundColor Yellow
+        Write-Host "    This usually means Intune is not licensed or the tenant admin" -ForegroundColor Yellow
+        Write-Host "    has restricted app consent for DeviceManagement permissions." -ForegroundColor Yellow
+        Write-Host "    Retrying with core scopes — sections 4-7 will be skipped." -ForegroundColor Yellow
+        Write-Host ""
+        Connect-Graph $coreScopes
+        $script:HasIntuneAccess = $false
+    } else {
+        # Some other auth error — re-throw so it's visible
+        throw
+    }
 }
 
 $ctx = Get-MgContext
@@ -201,39 +231,49 @@ Write-Host "[3/10] MFA Posture" -ForegroundColor Cyan
 $mfaReg = Collect "MFA Registration Details" { Get-MgReportAuthenticationMethodUserRegistrationDetail -All }
 
 # ── 4. Intune Configs ──
-Write-Host "[4/10] Intune Configuration Profiles" -ForegroundColor Cyan
-$intuneConfigs = Collect "Device Configurations" { Get-MgDeviceManagementDeviceConfiguration -All }
+$intuneConfigs      = @()
+$compliancePolicies = @()
+$managedDevices     = @()
+$autopilotDevices   = @()
+$apps               = @()
+$appSummaries       = @{}
 
-# ── 5. Device Compliance ──
-Write-Host "[5/10] Device Compliance" -ForegroundColor Cyan
-$compliancePolicies = Collect "Compliance Policies" { Get-MgDeviceManagementDeviceCompliancePolicy -All }
-$managedDevices     = Collect "Managed Devices"     {
-    Get-MgDeviceManagementManagedDevice -All -Property Id,DeviceName,OperatingSystem,OsVersion,ComplianceState,LastSyncDateTime,UserDisplayName,UserPrincipalName,ManagementAgent,JoinType,Manufacturer,Model
-}
+if ($script:HasIntuneAccess) {
+    Write-Host "[4/10] Intune Configuration Profiles" -ForegroundColor Cyan
+    $intuneConfigs = Collect "Device Configurations" { Get-MgDeviceManagementDeviceConfiguration -All }
 
-# ── 6. Autopilot ──
-Write-Host "[6/10] Windows Autopilot" -ForegroundColor Cyan
-$autopilotDevices = Collect "Autopilot Devices" { Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -All }
-
-# ── 7. Applications ──
-Write-Host "[7/10] Application Deployment" -ForegroundColor Cyan
-$apps = Collect "Mobile Apps" {
-    Get-MgDeviceAppManagementMobileApp -All -Property Id,DisplayName,Publisher,IsAssigned,CreatedDateTime,LastModifiedDateTime,'@odata.type'
-}
-
-$appSummaries = @{}
-if (-not $SkipAppSummary -and $apps.Count -gt 0) {
-    Write-Host "    App install summaries ($($apps.Count) apps, may take a moment)..." -ForegroundColor DarkCyan
-    $i = 0
-    foreach ($app in $apps) {
-        $i++
-        try {
-            $s = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps/$($app.Id)/installSummary" -ErrorAction SilentlyContinue
-            if ($s) { $appSummaries[$app.Id] = $s }
-        } catch {}
-        if ($i % 20 -eq 0) { Write-Host "      ... $i/$($apps.Count)" -ForegroundColor Gray }
+    # ── 5. Device Compliance ──
+    Write-Host "[5/10] Device Compliance" -ForegroundColor Cyan
+    $compliancePolicies = Collect "Compliance Policies" { Get-MgDeviceManagementDeviceCompliancePolicy -All }
+    $managedDevices     = Collect "Managed Devices"     {
+        Get-MgDeviceManagementManagedDevice -All -Property Id,DeviceName,OperatingSystem,OsVersion,ComplianceState,LastSyncDateTime,UserDisplayName,UserPrincipalName,ManagementAgent,JoinType,Manufacturer,Model
     }
-    Write-Host "    Done." -ForegroundColor Green
+
+    # ── 6. Autopilot ──
+    Write-Host "[6/10] Windows Autopilot" -ForegroundColor Cyan
+    $autopilotDevices = Collect "Autopilot Devices" { Get-MgDeviceManagementWindowsAutopilotDeviceIdentity -All }
+
+    # ── 7. Applications ──
+    Write-Host "[7/10] Application Deployment" -ForegroundColor Cyan
+    $apps = Collect "Mobile Apps" {
+        Get-MgDeviceAppManagementMobileApp -All -Property Id,DisplayName,Publisher,IsAssigned,CreatedDateTime,LastModifiedDateTime,'@odata.type'
+    }
+
+    if (-not $SkipAppSummary -and $apps.Count -gt 0) {
+        Write-Host "    App install summaries ($($apps.Count) apps, may take a moment)..." -ForegroundColor DarkCyan
+        $i = 0
+        foreach ($app in $apps) {
+            $i++
+            try {
+                $s = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps/$($app.Id)/installSummary" -ErrorAction SilentlyContinue
+                if ($s) { $appSummaries[$app.Id] = $s }
+            } catch {}
+            if ($i % 20 -eq 0) { Write-Host "      ... $i/$($apps.Count)" -ForegroundColor Gray }
+        }
+        Write-Host "    Done." -ForegroundColor Green
+    }
+} else {
+    Write-Host "[4-7/10] Skipping Intune sections (DeviceManagement scopes unavailable)" -ForegroundColor Yellow
 }
 
 # ── 8. Licensing ──
@@ -349,7 +389,12 @@ $winProfiles   = @($intuneConfigs | Where-Object { $_.'@odata.type' -match 'wind
 $macProfiles   = @($intuneConfigs | Where-Object { $_.'@odata.type' -match 'mac|osx' }).Count
 $iosProfiles   = @($intuneConfigs | Where-Object { $_.'@odata.type' -match 'ios|android' }).Count
 
-if ($configCount -eq 0) {
+if (-not $script:HasIntuneAccess) {
+    Add-Finding "Intune Profiles"   "Info" "Intune data not collected" "DeviceManagement scopes were unavailable in this tenant. Sections 4-7 require Intune licensing and admin consent."
+    Add-Finding "Device Compliance" "Info" "Intune data not collected" "DeviceManagement scopes were unavailable in this tenant."
+    Add-Finding "Autopilot"         "Info" "Intune data not collected" "DeviceManagement scopes were unavailable in this tenant."
+    Add-Finding "App Deployment"    "Info" "Intune data not collected" "DeviceManagement scopes were unavailable in this tenant."
+} elseif ($configCount -eq 0) {
     Add-Finding "Intune Profiles" "Critical" "No Intune device configuration profiles found" "No device configuration is being pushed via Intune."
 } else {
     Add-Finding "Intune Profiles" "Info" "$configCount configuration profile(s) deployed" "$winProfiles Windows, $macProfiles macOS, $iosProfiles iOS/Android."
@@ -751,6 +796,11 @@ foreach ($f in $sorted) {
 }
 $allFindingsHtml += '</ul>'
 
+# Banner shown at the top of sections 4-7 when Intune scopes were unavailable
+$intuneSkipBanner = if (-not $script:HasIntuneAccess) {
+    "<div class='alert alert-warning py-2 mb-3'><i class='bi bi-exclamation-triangle-fill me-2'></i><strong>Intune data not collected.</strong> The <code>DeviceManagement*</code> scopes were blocked by this tenant (AADSTS650053). This usually means Intune is not licensed here, or the tenant admin has restricted app consent. Re-run with an account that has Intune Administrator rights and admin consent granted to collect this data.</div>"
+} else { '' }
+
 $html = @"
 <!DOCTYPE html>
 <html lang="en">
@@ -886,10 +936,10 @@ $html = @"
         <tr><td><a href="#entra">Entra ID Configuration</a></td><td>$(section-badge 'Entra ID')</td><td>$totalUsers users ($enabledUsers enabled, $guestUsers guests, $hybridUsers hybrid), $federatedDoms federated domain(s)</td></tr>
         <tr><td><a href="#ca">Conditional Access</a></td><td>$(section-badge 'Conditional Access')</td><td>$enabledPolicies enabled &bull; $reportOnlyPolicies report-only &bull; $disabledPolicies disabled | MFA All-Users: $(if($mfaAllUsersPolicy){'Yes'}else{'NO'}) &bull; Legacy Blocked: $(if($legacyBlockPolicy){'Yes'}else{'NO'})</td></tr>
         <tr><td><a href="#mfa">MFA Posture</a></td><td>$(section-badge 'MFA Posture')</td><td>$mfaPct% registered ($mfaRegistered/$mfaTotal) &bull; $msAuthApp Authenticator &bull; $passwordless passwordless capable &bull; $noMfa no MFA</td></tr>
-        <tr><td><a href="#intune">Intune Config Profiles</a></td><td>$(section-badge 'Intune Profiles')</td><td>$configCount profiles: $winProfiles Windows &bull; $macProfiles macOS &bull; $iosProfiles iOS/Android</td></tr>
-        <tr><td><a href="#compliance">Device Compliance</a></td><td>$(section-badge 'Device Compliance')</td><td>$compliancePct% compliant ($compliantDev/$totalDevices) &bull; $nonCompliantDev non-compliant &bull; $unknownDev unknown</td></tr>
-        <tr><td><a href="#autopilot">Windows Autopilot</a></td><td>$(section-badge 'Autopilot')</td><td>$autopilotCount registered &bull; $withGroupTag with Group Tag &bull; $noGroupTag without Group Tag</td></tr>
-        <tr><td><a href="#apps">Application Deployment</a></td><td>$(section-badge 'App Deployment')</td><td>$totalApps apps &bull; $assignedApps assigned &bull; $unassignedApps unassigned</td></tr>
+        <tr><td><a href="#intune">Intune Config Profiles</a></td><td>$(section-badge 'Intune Profiles')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$configCount profiles: $winProfiles Windows &bull; $macProfiles macOS &bull; $iosProfiles iOS/Android"})</td></tr>
+        <tr><td><a href="#compliance">Device Compliance</a></td><td>$(section-badge 'Device Compliance')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$compliancePct% compliant ($compliantDev/$totalDevices) &bull; $nonCompliantDev non-compliant &bull; $unknownDev unknown"})</td></tr>
+        <tr><td><a href="#autopilot">Windows Autopilot</a></td><td>$(section-badge 'Autopilot')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$autopilotCount registered &bull; $withGroupTag with Group Tag &bull; $noGroupTag without Group Tag"})</td></tr>
+        <tr><td><a href="#apps">Application Deployment</a></td><td>$(section-badge 'App Deployment')</td><td>$(if(-not $script:HasIntuneAccess){'<em class="text-muted">Not collected — DeviceManagement scopes unavailable</em>'}else{"$totalApps apps &bull; $assignedApps assigned &bull; $unassignedApps unassigned"})</td></tr>
         <tr><td><a href="#licensing">M365 Licensing</a></td><td>$(section-badge 'Licensing')</td><td>$licenseUtil% utilization ($totalAssigned/$totalAvailable seats) &bull; $unusedSeats unused seats</td></tr>
         <tr><td><a href="#legacy">Legacy Authentication</a></td><td>$(section-badge 'Legacy Authentication')</td><td>$(if($SkipSignInLogs){'Skipped'}else{"$legacyCount sign-ins ($legacyUniqueU unique users) in last $SignInLogDays days"})</td></tr>
         <tr><td><a href="#emergency">Emergency Access</a></td><td>$(section-badge 'Emergency Access')</td><td>$emergencyCount potential break-glass account(s) identified</td></tr>
@@ -966,6 +1016,7 @@ $(findings-list 'MFA Posture')
 
 <!-- ── 4. INTUNE PROFILES ── -->
 $(section-wrap 'intune' '4' 'bi-gear' 'Intune Configuration Profile Review' @"
+$intuneSkipBanner
 <div class='stat-row'>
   $(stat-box $configCount  'Total Profiles' 'info')
   $(stat-box $winProfiles  'Windows'        'info')
@@ -980,6 +1031,7 @@ $(findings-list 'Intune Profiles')
 
 <!-- ── 5. DEVICE COMPLIANCE ── -->
 $(section-wrap 'compliance' '5' 'bi-clipboard-check' 'Device Compliance Policy Assessment' @"
+$intuneSkipBanner
 <div class='row g-3'>
   <div class='col-md-8'>
     <div class='stat-row'>
@@ -1008,6 +1060,7 @@ $(findings-list 'Device Compliance')
 
 <!-- ── 6. AUTOPILOT ── -->
 $(section-wrap 'autopilot' '6' 'bi-laptop' 'Windows Autopilot Registration Status' @"
+$intuneSkipBanner
 <div class='stat-row'>
   $(stat-box $autopilotCount 'Registered Devices'  'info')
   $(stat-box $withGroupTag   'With Group Tag'       'success')
@@ -1021,6 +1074,7 @@ $(findings-list 'Autopilot')
 
 <!-- ── 7. APPLICATIONS ── -->
 $(section-wrap 'apps' '7' 'bi-box-seam' 'Application Deployment Review' @"
+$intuneSkipBanner
 <div class='stat-row'>
   $(stat-box $totalApps      'Total Apps'   'info')
   $(stat-box $assignedApps   'Assigned'     'success')
