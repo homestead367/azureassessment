@@ -313,12 +313,16 @@ if (-not $SkipSignInLogs) {
 # ── 10. Emergency Access ──
 Write-Host "[10/10] Emergency Access" -ForegroundColor Cyan
 $bgPatterns = @('emergency','breakglass','break-glass','breakgl','bga','bgb','bg1','bg2','e911','emerg','bkgls')
+$gaUpns = @($adminRoles | Where-Object { $_.RoleName -eq 'Global Administrator' -and $_.MemberUPN } | ForEach-Object { $_.MemberUPN.ToLower() })
 $emergencyAccts = @($users | Where-Object {
     $upn  = $_.UserPrincipalName.ToLower()
     $name = $_.DisplayName.ToLower()
     $hit  = $false
     foreach ($p in $bgPatterns) { if ($upn -like "*$p*" -or $name -like "*$p*") { $hit = $true; break } }
     $hit
+} | ForEach-Object {
+    $isGA = $gaUpns -contains $_.UserPrincipalName.ToLower()
+    Add-Member -InputObject $_ -NotePropertyName IsGlobalAdmin -NotePropertyValue $isGA -Force -PassThru
 })
 
 $riskyUsers = Collect "Risky Users" { Get-MgRiskyUser -All }
@@ -496,8 +500,11 @@ if ($emergencyCount -eq 0) {
     Add-Finding "Emergency Access" "Warning" "No break-glass accounts identified" "No accounts matching common emergency-access naming patterns were found. Every tenant should have 2 cloud-only break-glass accounts."
 } else {
     Add-Finding "Emergency Access" "Info" "$emergencyCount potential break-glass account(s) found" "Verify these are cloud-only, excluded from all CA policies, monitored via alerts, and credentials stored securely offline."
-    # Check if each is excluded from all enabled CA policies
     foreach ($bg in $emergencyAccts) {
+        if (-not $bg.IsGlobalAdmin) {
+            Add-Finding "Emergency Access" "Warning" "Potential break-glass '$($bg.DisplayName)' does not hold Global Administrator role" "Account name matches break-glass naming patterns but isn't a Global Administrator — may be a false positive or a misconfigured break-glass account."
+        }
+        # Check if each is excluded from all enabled CA policies
         foreach ($policy in ($caPolicies | Where-Object { $_.State -eq 'enabled' })) {
             if ($policy.Conditions.Users.ExcludeUsers -notcontains $bg.Id) {
                 Add-Finding "Emergency Access" "Critical" "Break-glass '$($bg.DisplayName)' not excluded from CA: '$($policy.DisplayName)'" "If this policy locks out all users, break-glass access will fail."
@@ -751,7 +758,7 @@ $domTable = build-table $domains @('Domain','Auth Type','Default','Verified','Se
 }
 
 # Emergency accounts
-$bgTable = build-table $emergencyAccts @('Display Name','UPN','Enabled','User Type','Created','Licenses') {
+$bgTable = build-table $emergencyAccts @('Display Name','UPN','Enabled','User Type','Created','Licenses','Global Admin') {
     param($u)
     $n  = HE $u.DisplayName
     $upn = HE $u.UserPrincipalName
@@ -759,7 +766,8 @@ $bgTable = build-table $emergencyAccts @('Display Name','UPN','Enabled','User Ty
     $ut = HE $u.UserType
     $cr = if ($u.CreatedDateTime) { ([datetime]$u.CreatedDateTime).ToString('yyyy-MM-dd') } else { '-' }
     $lic = $u.AssignedLicenses.Count
-    "<td><strong>$n</strong></td><td><small>$upn</small></td><td>$en</td><td>$ut</td><td>$cr</td><td>$lic</td>"
+    $ga = if ($u.IsGlobalAdmin) { badge 'Yes' 'success' } else { badge 'No' 'warning' }
+    "<td><strong>$n</strong></td><td><small>$upn</small></td><td>$en</td><td>$ut</td><td>$cr</td><td>$lic</td><td>$ga</td>"
 }
 
 #endregion
