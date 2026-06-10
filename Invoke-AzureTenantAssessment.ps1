@@ -312,7 +312,7 @@ if (-not $SkipSignInLogs) {
 
 # ── 10. Emergency Access ──
 Write-Host "[10/10] Emergency Access" -ForegroundColor Cyan
-$bgPatterns = @('emergency','breakglass','break-glass','breakgl','bga','bgb','bg1','bg2','e911','eam','emerg','bkgls')
+$bgPatterns = @('emergency','breakglass','break-glass','breakgl','bga','bgb','bg1','bg2','e911','emerg','bkgls')
 $emergencyAccts = @($users | Where-Object {
     $upn  = $_.UserPrincipalName.ToLower()
     $name = $_.DisplayName.ToLower()
