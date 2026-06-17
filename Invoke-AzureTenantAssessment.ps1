@@ -374,6 +374,11 @@ $signInRiskPolicy = $caPolicies | Where-Object {
 $userRiskPolicy = $caPolicies | Where-Object {
     $_.State -eq 'enabled' -and $_.Conditions.UserRiskLevels.Count -gt 0
 }
+$customControlPolicies = @($caPolicies | Where-Object {
+    $_.State -ne 'disabled' -and
+    $_.GrantControls.CustomAuthenticationFactors -and
+    $_.GrantControls.CustomAuthenticationFactors.Count -gt 0
+})
 
 if (-not $mfaAllUsersPolicy)  { Add-Finding "Conditional Access" "Critical" "No MFA policy covering All Users"          "No enabled CA policy requires MFA for all users. Users may authenticate without MFA." }
 else                           { Add-Finding "Conditional Access" "Good"     "MFA policy for All Users exists"           "An enabled CA policy enforces MFA for all users." }
@@ -384,6 +389,10 @@ if (-not $userRiskPolicy)      { Add-Finding "Conditional Access" "Warning"  "No
 
 if ($reportOnlyPolicies -gt 0) {
     Add-Finding "Conditional Access" "Warning" "$reportOnlyPolicies CA policy(ies) in Report-Only mode" "Report-only policies are not enforced. Review and enable when ready."
+}
+if ($customControlPolicies.Count -gt 0) {
+    $cclNames = ($customControlPolicies.DisplayName | Select-Object -Unique) -join ', '
+    Add-Finding "Conditional Access" "Warning" "$($customControlPolicies.Count) CA policy(ies) use a custom authentication control" "Policies [$cclNames] rely on a custom control (e.g. Duo, RSA, or another third-party MFA provider). Entra ID does not record these methods in authentication method registration data, so affected users may appear as 'No MFA' in the MFA Posture section below even though they are challenged by the third-party provider."
 }
 
 # ── MFA ──
@@ -946,6 +955,17 @@ $hc_mfapct_col  = if ($mfaPct -ge 90)  { 'success' } elseif ($mfaPct -ge 70)  { 
 $hc_nomfa_col   = if ($noMfa -eq 0)    { 'success' } else { 'danger' }
 $hc_phone_col   = if ($phoneMethod -gt 0) { 'warning' } else { 'success' }
 $hc_mfalbl      = if ($noMfaList.Count -gt 50) { "(showing first 50 of $($noMfaList.Count))" } else { '' }
+$mfaThirdPartyCaveat = if ($customControlPolicies.Count -gt 0) {
+@"
+<div class='alert alert-warning py-2 small'>
+  <i class='bi bi-exclamation-triangle me-1'></i>
+  $($customControlPolicies.Count) Conditional Access polic$(if ($customControlPolicies.Count -eq 1) {'y'} else {'ies'}) use a <strong>custom authentication control</strong>
+  (commonly Duo, RSA, or another third-party MFA provider). Entra ID does not record third-party MFA challenges in
+  authentication method registration data &mdash; users protected this way may incorrectly appear as <strong>"No MFA"</strong>
+  below. Cross-check the Conditional Access section before treating those users as unprotected.
+</div>
+"@
+} else { '' }
 
 $hc_comp_col    = if ($compliancePct -ge 90) { 'success' } elseif ($compliancePct -ge 70) { 'warning' } else { 'danger' }
 $hc_noncomp_col = if ($nonCompliantDev -gt 0) { 'danger' }   else { 'success' }
@@ -1149,6 +1169,7 @@ $(findings-list 'Conditional Access')
 
 <!-- ── 3. MFA ── -->
 $(section-wrap 'mfa' '3' 'bi-phone' 'MFA Posture Assessment' @"
+$mfaThirdPartyCaveat
 <div class='row g-3'>
   <div class='col-md-8'>
     <div class='stat-row'>
