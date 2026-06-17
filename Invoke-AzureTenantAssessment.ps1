@@ -414,6 +414,8 @@ if ($phoneMethod -gt 0) {
     Add-Finding "MFA Posture" "Warning" "$phoneMethod user(s) using SMS/voice as primary MFA method" "SMS and voice call MFA are vulnerable to SIM-swap and SS7 attacks. Migrate to Authenticator app."
 }
 
+$noMfaList = @($mfaReg | Where-Object { -not $_.IsMfaRegistered })
+
 # ── Intune ──
 $configCount   = $intuneConfigs.Count
 $winProfiles   = @($intuneConfigs | Where-Object { $_.'@odata.type' -match 'windows' }).Count
@@ -495,11 +497,26 @@ if ($unusedSeats -gt 20) {
 $legacyCount    = $legacySignIns.Count
 $legacyUniqueU  = if ($legacyCount -gt 0) { @($legacySignIns | Select-Object -ExpandProperty UserPrincipalName -Unique).Count } else { 0 }
 
+# Cross-check legacy auth users against MFA registration. Legacy protocols can't be
+# challenged for MFA regardless of registration, but a legacy-auth user who also has
+# no MFA registered has no second factor anywhere - the highest-priority remediation target.
+$noMfaUpns       = @($noMfaList | Select-Object -ExpandProperty UserPrincipalName -Unique)
+$legacyNoMfaUpns = @()
+$legacyNoMfaCount = 0
+if ($legacyCount -gt 0 -and $noMfaUpns.Count -gt 0) {
+    $legacyUserUpns   = @($legacySignIns | Select-Object -ExpandProperty UserPrincipalName -Unique)
+    $legacyNoMfaUpns  = @($legacyUserUpns | Where-Object { $_ -in $noMfaUpns })
+    $legacyNoMfaCount = $legacyNoMfaUpns.Count
+}
+
 if (-not $SkipSignInLogs) {
     if ($legacyCount -gt 0) {
         Add-Finding "Legacy Authentication" "Critical" "$legacyCount legacy auth sign-in(s) in last $SignInLogDays days" "$legacyUniqueU unique user(s) are authenticating with legacy protocols. Block these immediately."
     } else {
         Add-Finding "Legacy Authentication" "Good" "No legacy authentication sign-ins detected" "No legacy auth activity found in the last $SignInLogDays days."
+    }
+    if ($legacyNoMfaCount -gt 0) {
+        Add-Finding "Legacy Authentication" "Critical" "$legacyNoMfaCount legacy auth user(s) have no MFA registered" "These accounts have no second factor at all and are signing in over protocols that can't enforce MFA even if it were configured. Prioritize for immediate password reset and legacy auth blocking: $($legacyNoMfaUpns -join ', ')"
     }
 }
 
@@ -629,7 +646,6 @@ $caTable = build-table $caPolicies @('Policy Name','State','Include Users','Excl
 }
 
 # MFA - users without MFA
-$noMfaList  = @($mfaReg | Where-Object { -not $_.IsMfaRegistered })
 $mfaTable   = build-table $noMfaList @('Display Name','UPN','MFA Capable','SSPR Registered','Methods') {
     param($u)
     $n   = HE $u.UserDisplayName
@@ -732,16 +748,17 @@ $skuTable = build-table $skus @('License (SKU Part Number)','Assigned','Availabl
 $legacyTable = if ($SkipSignInLogs) {
     '<p class="text-muted small">Skipped. Run without -SkipSignInLogs to collect sign-in data.</p>'
 } else {
-    build-table $legacySignIns @('User','App','Client App','Date','IP Address','Location','CA Result') {
+    build-table $legacySignIns @('User','MFA Status','App','Client App','Date','IP Address','Location','CA Result') {
         param($s)
-        $u   = HE $s.UserPrincipalName
-        $app = HE $s.AppDisplayName
-        $cl  = HE $s.ClientAppUsed
-        $dt  = if ($s.CreatedDateTime) { ([datetime]$s.CreatedDateTime).ToString('yyyy-MM-dd HH:mm') } else { '-' }
-        $ip  = HE $s.IPAddress
-        $loc = HE "$($s.Location.City), $($s.Location.CountryOrRegion)"
-        $ca  = HE $s.ConditionalAccessStatus
-        "<td><small>$u</small></td><td><small>$app</small></td><td><small>$cl</small></td><td>$dt</td><td>$ip</td><td>$loc</td><td>$ca</td>"
+        $u    = HE $s.UserPrincipalName
+        $mfa  = if ($s.UserPrincipalName -in $noMfaUpns) { badge 'No MFA' 'danger' } else { badge 'MFA Registered' 'success' }
+        $app  = HE $s.AppDisplayName
+        $cl   = HE $s.ClientAppUsed
+        $dt   = if ($s.CreatedDateTime) { ([datetime]$s.CreatedDateTime).ToString('yyyy-MM-dd HH:mm') } else { '-' }
+        $ip   = HE $s.IPAddress
+        $loc  = HE "$($s.Location.City), $($s.Location.CountryOrRegion)"
+        $ca   = HE $s.ConditionalAccessStatus
+        "<td><small>$u</small></td><td>$mfa</td><td><small>$app</small></td><td><small>$cl</small></td><td>$dt</td><td>$ip</td><td>$loc</td><td>$ca</td>"
     }
 }
 
@@ -982,6 +999,8 @@ $hc_lguniq_val  = if ($SkipSignInLogs) { 'N/A' } else { "$legacyUniqueU" }
 $hc_lguniq_col  = if ($legacyUniqueU  -gt 0) { 'danger' } else { 'success' }
 $hc_lgblk_val   = if ($legacyBlockPolicy) { 'Blocked' } else { 'Open' }
 $hc_lgblk_col   = if ($legacyBlockPolicy) { 'success' } else { 'danger' }
+$hc_lgnomfa_val = if ($SkipSignInLogs) { 'N/A' } else { "$legacyNoMfaCount" }
+$hc_lgnomfa_col = if ($legacyNoMfaCount -gt 0) { 'danger' } else { 'success' }
 
 $hc_emerg_col   = if ($emergencyCount -gt 0) { 'success' } else { 'danger' }
 
@@ -1213,11 +1232,13 @@ $(findings-list 'Licensing')
 <!-- ── 9. LEGACY AUTH ── -->
 $(section-wrap 'legacy' '9' 'bi-exclamation-triangle' 'Legacy Authentication Analysis' @"
 <div class='stat-row'>
-  $(stat-box $hc_lgcnt_val  "Sign-ins (${SignInLogDays}d)" $hc_lgcnt_col)
-  $(stat-box $hc_lguniq_val 'Unique Users'                $hc_lguniq_col)
-  $(stat-box $hc_lgblk_val  'CA Block Policy'             $hc_lgblk_col)
+  $(stat-box $hc_lgcnt_val   "Sign-ins (${SignInLogDays}d)" $hc_lgcnt_col)
+  $(stat-box $hc_lguniq_val  'Unique Users'                $hc_lguniq_col)
+  $(stat-box $hc_lgnomfa_val 'Legacy Users w/ No MFA'       $hc_lgnomfa_col)
+  $(stat-box $hc_lgblk_val   'CA Block Policy'              $hc_lgblk_col)
 </div>
 <div class='findings-title'>Legacy Authentication Sign-ins</div>
+<p class='text-muted small'>The <strong>MFA Status</strong> column flags whether each user also has no MFA registered at all — these accounts have no second factor anywhere and should be prioritized for remediation. Legacy protocols bypass MFA enforcement regardless of registration status; see <a href='https://learn.microsoft.com/entra/identity/conditional-access/policy-block-legacy-authentication' target='_blank' rel='noopener'>Block legacy authentication with Conditional Access</a> for background and remediation steps.</p>
 $legacyTable
 <div class='findings-title mt-3'>Findings</div>
 $(findings-list 'Legacy Authentication')
